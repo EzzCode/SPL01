@@ -13,10 +13,9 @@ int cd(char **args, int arg_count);
 char **parse_command(char *input, int *arg_count);
 void free_args(char **args, int arg_count);
 int execute_external(char **args);
+
+
 int picoshell_main(int argc, char *argv[]) {
-    // Write your code here
-    // Do not write a main() function. Instead, deal with picoshell_main() as the main function of your program.
-    
     char *buffer = NULL;
     size_t buffer_size = 0;
     ssize_t bytes_read;
@@ -29,6 +28,7 @@ int picoshell_main(int argc, char *argv[]) {
             printf("%s %s", cwd, PROMPT);
         } else {
             printf(PROMPT);
+            fflush(stdout);
         }
         
         bytes_read = getline(&buffer, &buffer_size, stdin);
@@ -40,11 +40,6 @@ int picoshell_main(int argc, char *argv[]) {
         // Remove newline
         if (bytes_read > 0 && buffer[bytes_read - 1] == '\n') {
             buffer[bytes_read - 1] = '\0';
-        }
-
-        // Skip empty input
-        if (strlen(buffer) == 0) {
-            continue;
         }
 
         // Parse command
@@ -107,9 +102,9 @@ int cd(char **args, int arg_count) {
     }
     if (chdir(args[1]) != 0) {
         printf("cd: %s: No such file or directory\n", args[1]);
-        //perror("cd");
         return -1;
-    }    return 0;
+    }
+    return 0;
 }
 
 char **parse_command(char *input, int *arg_count) {
