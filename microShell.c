@@ -19,12 +19,13 @@ ShellVar *variables = NULL;
 int var_count = 0;
 
 // Function declarations
-void echo(char **args, int arg_count);
-void pwd();
+int echo(char **args, int arg_count);
+int pwd();
 int cd(char **args, int arg_count);
 char **parse_command(char *input, int *arg_count);
 void free_args(char **args, int arg_count);
-int execute_external(char **args);
+int execute_external(char **args, int arg_count);
+int handle_redirections(char **args, int *arg_count);
 void substitute_variables(char **args, int arg_count);
 void add_or_update_var(const char *name, const char *value, int exported);
 const char *get_var_value(const char *name);
@@ -85,11 +86,11 @@ int microshell_main(int argc, char *argv[]) {
             break;
         } else if (strcmp(args[0], "echo") == 0) {
             substitute_variables(args, arg_count);
-            echo(args, arg_count);
-            status = 0;
+            status = echo(args, arg_count);
+
         } else if (strcmp(args[0], "pwd") == 0) {
-            pwd();
-            status = 0;
+            status = pwd();
+
         } else if (strcmp(args[0], "cd") == 0) {
             substitute_variables(args, arg_count);
             status = cd(args, arg_count);
@@ -102,7 +103,7 @@ int microshell_main(int argc, char *argv[]) {
             status = 0;
         } else {
             substitute_variables(args, arg_count);
-            status = execute_external(args);
+            status = execute_external(args, arg_count);
         }
 
         free_args(args, arg_count);
@@ -121,7 +122,90 @@ int microshell_main(int argc, char *argv[]) {
 }
 
 // Built-in commands
-void echo(char **args, int arg_count) {
+// Helper function to handle redirections and modify args array
+int handle_redirections(char **args, int *arg_count) {
+    int i = 0;
+    while (args[i] != NULL) {
+        if (strcmp(args[i], "<") == 0) {
+            if (args[i+1] == NULL) {
+                printf("syntax error near unexpected token `newline'\n");
+                return -1;
+            }
+            char *input_file = args[i+1];
+            int stdin_fd = open(input_file, O_RDONLY);
+            if (stdin_fd == -1) {
+                fprintf(stderr, "cannot access %s: No such file or directory\n", input_file);
+                return -1;
+            }
+            if (dup2(stdin_fd, STDIN_FILENO) == -1) {
+                perror("dup2 stdin");
+                return -1;
+            }
+            close(stdin_fd);
+            // Remove redirection tokens from args
+            for (int j = i; args[j] != NULL; j++) {
+                args[j] = args[j+2];
+            }
+            (*arg_count) -= 2;
+            continue;
+        }
+        else if (strcmp(args[i], ">") == 0) {
+            if (args[i+1] == NULL) {
+                printf("syntax error near unexpected token `newline'\n");
+                return -1;
+            }
+            char *output_file = args[i+1];
+            int stdout_fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (stdout_fd == -1) {
+                fprintf(stderr, "%s: Permission denied\n", output_file);
+                return -1;
+            }
+            if (dup2(stdout_fd, STDOUT_FILENO) == -1) {
+                perror("dup2 stdout");
+                return -1;
+            }
+            close(stdout_fd);
+            // Remove redirection tokens from args
+            for (int j = i; args[j] != NULL; j++) {
+                args[j] = args[j+2];
+            }
+            (*arg_count) -= 2;
+            continue;
+        }
+        else if (strcmp(args[i], "2>") == 0) {
+            if (args[i+1] == NULL) {
+                printf("syntax error near unexpected token `newline'\n");
+                return -1;
+            }
+            char *error_file = args[i+1];
+            int stderr_fd = open(error_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (stderr_fd == -1) {
+                perror("open error file");
+                return -1;
+            }
+            if (dup2(stderr_fd, STDERR_FILENO) == -1) {
+                perror("dup2 stderr");
+                return -1;
+            }
+            close(stderr_fd);
+            // Remove redirection tokens from args
+            for (int j = i; args[j] != NULL; j++) {
+                args[j] = args[j+2];
+            }
+            (*arg_count) -= 2;
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+// Modified built-in functions to use redirections
+int echo(char **args, int arg_count) {
+    int error = handle_redirections(args, &arg_count);
+    if (error != 0) {
+        return -1;
+    }
     for (int i = 1; i < arg_count; i++) {
         printf("%s", args[i]);
         if (i < arg_count - 1) {
@@ -129,18 +213,24 @@ void echo(char **args, int arg_count) {
         }
     }
     printf("\n");
+    return 0;
 }
 
-void pwd() {
+int pwd() {
     char cwd[PATH_MAX];
     if (getcwd(cwd, sizeof(cwd))) {
         printf("%s\n", cwd);
     } else {
         perror("pwd");
     }
+    return 0;
 }
 
 int cd(char **args, int arg_count) {
+    int error = handle_redirections(args, &arg_count);
+    if (error != 0) {
+        return -1;
+    }
     if (arg_count < 2) {
         fprintf(stderr, "cd: missing argument\n");
         return -1;
@@ -150,6 +240,37 @@ int cd(char **args, int arg_count) {
         return -1;
     }
     return 0;
+}
+
+// Simplified execute_external function
+int execute_external(char **args, int arg_count) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+        return -1;
+    }
+
+    if (pid == 0) {
+        int error = handle_redirections(args, &arg_count);
+        if (error != 0) {
+            exit(EXIT_FAILURE);
+        }
+
+        // Exported vars only
+        for (int i = 0; i < var_count; i++) {
+            if (variables[i].exported) {
+                setenv(variables[i].name, variables[i].value, 1);
+            }
+        }
+
+        execvp(args[0], args);
+        printf("%s: command not found\n", args[0]);
+        exit(EXIT_FAILURE);
+    } else {
+        int status;
+        waitpid(pid, &status, 0);
+        return WEXITSTATUS(status);
+    }
 }
 
 // Variable system
@@ -261,104 +382,4 @@ void free_args(char **args, int arg_count) {
     free(args);
 }
 
-int execute_external(char **args) {
-    int stdin_fd = -1, stdout_fd = -1, stderr_fd = -1;
-    char *input_file = NULL;
-    char *output_file = NULL;
-    char *error_file = NULL;
-    
-    pid_t pid = fork();
-    if (pid == -1) {
-        perror("fork");
-        return -1;
-    }
 
-    if (pid == 0) {
-        // Child parses redirections and redirects immediately
-        int i = 0;
-        while (args[i] != NULL) {
-            if (strcmp(args[i], "<") == 0) {
-            if (args[i+1] == NULL) {
-                printf("syntax error near unexpected token `newline'\n");
-                exit(EXIT_FAILURE);
-            }
-            input_file = args[i+1];
-            stdin_fd = open(input_file, O_RDONLY);
-            if (stdin_fd == -1) {
-                fprintf(stderr, "cannot access %s: No such file or directory\n", input_file);
-                exit(EXIT_FAILURE);
-            }
-            if (dup2(stdin_fd, STDIN_FILENO) == -1) {
-                perror("dup2 stdin");
-                exit(EXIT_FAILURE);
-            }
-            close(stdin_fd);
-            // Remove redirection tokens from args
-            for (int j = i; args[j] != NULL; j++) {
-                args[j] = args[j+2];
-            }
-            continue;
-            }
-            else if (strcmp(args[i], ">") == 0) {
-            if (args[i+1] == NULL) {
-                printf("syntax error near unexpected token `newline'\n");
-                exit(EXIT_FAILURE);
-            }
-            output_file = args[i+1];
-            stdout_fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (stdout_fd == -1) {
-                perror("open output file");
-                exit(EXIT_FAILURE);
-            }
-            if (dup2(stdout_fd, STDOUT_FILENO) == -1) {
-                perror("dup2 stdout");
-                exit(EXIT_FAILURE);
-            }
-            close(stdout_fd);
-            // Remove redirection tokens from args
-            for (int j = i; args[j] != NULL; j++) {
-                args[j] = args[j+2];
-            }
-            continue;
-            }
-            else if (strcmp(args[i], "2>") == 0) {
-            if (args[i+1] == NULL) {
-                printf("syntax error near unexpected token `newline'\n");
-                exit(EXIT_FAILURE);
-            }
-            error_file = args[i+1];
-            stderr_fd = open(error_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (stderr_fd == -1) {
-                perror("open error file");
-                exit(EXIT_FAILURE);
-            }
-            if (dup2(stderr_fd, STDERR_FILENO) == -1) {
-                perror("dup2 stderr");
-                exit(EXIT_FAILURE);
-            }
-            close(stderr_fd);
-            // Remove redirection tokens from args
-            for (int j = i; args[j] != NULL; j++) {
-                args[j] = args[j+2];
-            }
-            continue;
-            }
-            i++;
-        }
-
-        // Exported vars only
-        for (int i = 0; i < var_count; i++) {
-            if (variables[i].exported) {
-                setenv(variables[i].name, variables[i].value, 1);
-            }
-        }
-
-        execvp(args[0], args);
-        printf("%s: command not found\n", args[0]);
-        exit(EXIT_FAILURE);
-    } else {
-        int status;
-        waitpid(pid, &status, 0);
-        return WEXITSTATUS(status);
-    }
-}
